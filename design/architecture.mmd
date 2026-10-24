@@ -1,0 +1,44 @@
+flowchart LR
+  subgraph CH["Sales channels"]
+    WEB["Own website"]
+    NYK["Nykaa"]
+    FK["Flipkart"]
+    BLK["Blinkit"]
+  end
+
+  subgraph AWS["AWS ap-south-1 · one VPC"]
+    ALB["ALB"]
+    subgraph ECS["ECS Fargate · one NestJS codebase, 3 process roles"]
+      API["api (2+ tasks)<br/>webhook receivers<br/>website reserve API<br/>ops screen API"]
+      WRK["worker (2+ tasks)<br/>BullMQ consumers:<br/>ingest · reserve · push · ERP"]
+      SCH["scheduler (1 task)<br/>Flipkart poller · stock dispatchers<br/>outbox sweeper · reconciliation"]
+    end
+    PG[("RDS PostgreSQL<br/>source of truth:<br/>inventory · ledger · orders · outbox")]
+    RD[("ElastiCache Redis<br/>BullMQ queues<br/>rate-limit token buckets")]
+    S3[("S3<br/>Blinkit CSVs")]
+    CW["CloudWatch<br/>metrics · alarms → Slack"]
+  end
+
+  ERP["MS Business Central"]
+  OPS["Ops team"]
+
+  WEB -->|"webhook + sync reserve at checkout"| ALB
+  NYK -->|webhook| ALB
+  BLK -->|webhook| ALB
+  OPS -->|"failed syncs · retry · SKU history"| ALB
+  ALB --> API
+  API -->|"1. insert inbound_event (dedupe)"| PG
+  API -->|"2. enqueue event id"| RD
+  RD --> WRK
+  WRK -->|"normalize → reserve → ledger → outbox (1 tx)"| PG
+  SCH -->|"poll orders every 2 min"| FK
+  SCH -->|"find SKUs where version > pushed_version"| PG
+  SCH -->|"push / outbox jobs"| RD
+  WRK -->|"1 SKU/call, ≤5 rps"| NYK
+  WRK -->|"50 SKUs/call, ≤8 rps"| FK
+  WRK -->|"REST for urgent changes, retry + breaker"| BLK
+  SCH -->|"daily full CSV"| S3
+  S3 --> BLK
+  WRK -->|"direct DB/API"| WEB
+  WRK -->|"orders, idempotent by External Doc No."| ERP
+  WRK --> CW
